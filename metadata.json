@@ -1,0 +1,6 @@
+{
+  "name": "Hertzy",
+  "description": "Every voice has a Signature. Real-time speech-to-text, acoustic tone & prosody analysis, suspicious keyword detection, and voice deepfake risk scoring.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
