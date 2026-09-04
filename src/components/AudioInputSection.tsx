@@ -6,7 +6,6 @@ import {
   Play,
   Pause,
   RotateCcw,
-  Sparkles,
   Sliders,
   Volume2,
   FileAudio,
@@ -20,7 +19,6 @@ import {
   ListChecks,
 } from "lucide-react";
 import { audioBufferToWavBase64 } from "../services/audioProcessor";
-import { SAMPLE_SCENARIOS, SampleScenario } from "../data/sampleAudios";
 import { useLanguage } from "../context/LanguageContext";
 
 interface AudioInputSectionProps {
@@ -76,7 +74,6 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
 
   // Audio Playback state
   const [isPlaying, setIsPlaying] = useState(false);
-  const [activePlayingScenarioId, setActivePlayingScenarioId] = useState<string | null>(null);
   const playbackSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const playbackAudioCtxRef = useRef<AudioContext | null>(null);
 
@@ -262,7 +259,7 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
       }, 1000);
     } catch (err: any) {
       console.error("Microphone access denied or failed:", err);
-      setStatusNote("Microphone permission denied or device not found. You can test with benchmark scenarios or upload an audio file.");
+      setStatusNote("Microphone permission denied or device not found. Please upload an audio file instead.");
       setIsRecording(false);
       onSetIsPlayingOrRecording(false);
     }
@@ -364,60 +361,6 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
       source.start(0);
       playbackSourceNodeRef.current = source;
       setIsPlaying(true);
-    }
-  };
-
-  // Run Benchmark Scenario directly
-  const handleSelectScenario = async (scenario: SampleScenario) => {
-    try {
-      setStatusNote(`Loading benchmark scenario: ${scenario.title}...`);
-      setActivePlayingScenarioId(scenario.id);
-      
-      const { base64, buffer } = await scenario.generateAudio();
-
-      // Hook up real-time audio playback through the visualizer
-      if (playbackSourceNodeRef.current) {
-        try { playbackSourceNodeRef.current.stop(); } catch (_) {}
-      }
-      
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      playbackAudioCtxRef.current = audioCtx;
-      const source = audioCtx.createBufferSource();
-      source.buffer = buffer;
-
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyser.connect(audioCtx.destination);
-
-      onSetAnalyserNode(analyser);
-      onSetIsPlayingOrRecording(true);
-      setIsPlaying(true);
-
-      source.onended = () => {
-        setIsPlaying(false);
-        setActivePlayingScenarioId(null);
-        onSetIsPlayingOrRecording(false);
-      };
-
-      source.start(0);
-      playbackSourceNodeRef.current = source;
-
-      // Trigger analysis pipeline
-      onAudioReadyForAnalysis({
-        audioBase64: base64,
-        audioBuffer: buffer,
-        sourceType: "sample",
-        scenarioTitle: scenario.title,
-        fileName: `${scenario.id}.wav`,
-        durationSeconds: buffer.duration,
-        liveTranscript: scenario.transcriptPreview,
-      });
-
-      setStatusNote("");
-    } catch (err: any) {
-      console.error("Failed to execute benchmark scenario:", err);
-      setStatusNote("Error generating benchmark acoustic signal.");
     }
   };
 

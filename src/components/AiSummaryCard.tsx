@@ -249,18 +249,73 @@ export const AiSummaryCard: React.FC<AiSummaryCardProps> = ({
           const categoryBadge =
             categories[idx]?.badge || `Analysis Point ${idx + 1}`;
           const isSpanningFull = idx === displayLines.length - 1 && displayLines.length % 2 === 1;
+          const isFinalWarning = idx === displayLines.length - 1;
+
+          // Determine risk level based on overallRiskScore and riskCategory
+          // Low risk: score <= 40 or category "Low" / "Very Low"
+          // Moderate risk: score between 41 and 70, or category "Moderate" / "Elevated"
+          // High risk: score > 70 or category "High" / deepfake suspected
+          const currentScore = typeof analysis?.overallRiskScore === "number" && Number.isFinite(analysis.overallRiskScore)
+            ? analysis.overallRiskScore
+            : 0;
+
+          const rawCategory = (analysis?.riskCategory || "").toLowerCase();
+          const isLowRisk =
+            rawCategory.includes("low") ||
+            rawCategory.includes("safe") ||
+            (!rawCategory.includes("high") && !rawCategory.includes("elevated") && !rawCategory.includes("moderate") && currentScore <= 40);
+
+          const isModerateRisk =
+            !isLowRisk &&
+            (rawCategory.includes("moderate") || rawCategory.includes("elevated") || (currentScore > 40 && currentScore <= 70));
+
+          let finalWarningContainerClass = "";
+          let finalWarningTextClass = "";
+          let finalWarningBadgeClass = "";
+          let finalWarningGlyphClass = "";
+
+          if (isFinalWarning) {
+            if (isLowRisk) {
+              // Vibrant Green glow and bold emerald styling for Low / Very Low Risk
+              finalWarningContainerClass =
+                "bg-emerald-50 dark:bg-emerald-950/50 border-2 border-emerald-500 dark:border-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.45)] ring-1 ring-emerald-400/50";
+              finalWarningTextClass = "font-bold text-emerald-900 dark:text-emerald-200 text-sm";
+              finalWarningBadgeClass = "bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border-emerald-500/50 font-bold";
+              finalWarningGlyphClass = "bg-emerald-600 text-white border-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]";
+            } else if (isModerateRisk) {
+              // Warm Amber/Orange glow for Moderate / Elevated Risk
+              finalWarningContainerClass =
+                "bg-amber-50 dark:bg-amber-950/50 border-2 border-amber-500 dark:border-amber-400 shadow-[0_0_20px_rgba(245,158,11,0.45)] ring-1 ring-amber-400/50";
+              finalWarningTextClass = "font-bold text-amber-900 dark:text-amber-200 text-sm";
+              finalWarningBadgeClass = "bg-amber-500/20 text-amber-800 dark:text-amber-300 border-amber-500/50 font-bold";
+              finalWarningGlyphClass = "bg-amber-600 text-white border-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]";
+            } else {
+              // High threat / Scam Red glow
+              finalWarningContainerClass =
+                "bg-rose-50 dark:bg-rose-950/50 border-2 border-rose-500 dark:border-rose-400 shadow-[0_0_22px_rgba(239,68,68,0.5)] ring-1 ring-rose-400/50";
+              finalWarningTextClass = "font-bold text-rose-950 dark:text-rose-100 text-sm";
+              finalWarningBadgeClass = "bg-rose-500/25 text-rose-800 dark:text-rose-200 border-rose-500/60 font-bold";
+              finalWarningGlyphClass = "bg-rose-600 text-white border-rose-500 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.5)]";
+            }
+          }
 
           return (
             <div
               key={idx}
               id={`ai-summary-point-${idx + 1}`}
-              className={`group relative p-3.5 rounded-xl bg-slate-50/90 dark:bg-[#0F172A]/90 border border-slate-200/90 dark:border-slate-800/90 hover:border-indigo-400/80 dark:hover:border-indigo-500/60 hover:bg-white dark:hover:bg-[#131C35] hover:shadow-xs transition-all duration-150 flex items-start gap-3 text-xs leading-relaxed text-slate-800 dark:text-slate-200 ${
-                isSpanningFull ? "md:col-span-2" : ""
-              }`}
+              className={`group relative p-3.5 rounded-xl border transition-all duration-150 flex items-start gap-3 text-xs leading-relaxed ${
+                isFinalWarning
+                  ? finalWarningContainerClass
+                  : "bg-slate-50/90 dark:bg-[#0F172A]/90 border-slate-200/90 dark:border-slate-800/90 hover:border-indigo-400/80 dark:hover:border-indigo-500/60 hover:bg-white dark:hover:bg-[#131C35] hover:shadow-xs text-slate-800 dark:text-slate-200"
+              } ${isSpanningFull ? "md:col-span-2" : ""}`}
             >
               {/* Step / Point Number Glyph */}
               <div
-                className={`mt-0.5 w-6 h-6 rounded-lg ${color.bg} ${color.text} ${color.border} border flex items-center justify-center font-bold text-[11px] font-mono shrink-0 shadow-2xs group-hover:scale-105 transition-transform`}
+                className={`mt-0.5 w-6 h-6 rounded-lg border flex items-center justify-center font-bold text-[11px] font-mono shrink-0 shadow-2xs group-hover:scale-105 transition-transform ${
+                  isFinalWarning
+                    ? finalWarningGlyphClass
+                    : `${color.bg} ${color.text} ${color.border}`
+                }`}
               >
                 {idx + 1}
               </div>
@@ -269,13 +324,23 @@ export const AiSummaryCard: React.FC<AiSummaryCardProps> = ({
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                   <span
-                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${color.badgeBg} ${color.text} border ${color.border}`}
+                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border ${
+                      isFinalWarning
+                        ? finalWarningBadgeClass
+                        : `${color.badgeBg} ${color.text} ${color.border}`
+                    }`}
                   >
                     <IconComponent className="w-3 h-3" />
                     {categoryBadge}
                   </span>
                 </div>
-                <p className="text-xs sm:text-[13px] leading-relaxed text-slate-700 dark:text-slate-200 font-normal">
+                <p
+                  className={`text-xs sm:text-[13px] leading-relaxed ${
+                    isFinalWarning
+                      ? finalWarningTextClass
+                      : "text-slate-700 dark:text-slate-200 font-normal"
+                  }`}
+                >
                   {cleanText}
                 </p>
               </div>

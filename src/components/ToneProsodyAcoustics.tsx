@@ -56,11 +56,6 @@ export const ToneProsodyAcoustics: React.FC<ToneProsodyAcousticsProps> = ({
             </span>
           </div>
         </div>
-
-        <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-indigo-700 dark:text-indigo-300">
-          <Cpu className="w-3 h-3 text-indigo-500 dark:text-indigo-400" />
-          Hertzy {t("acoustic_ml_badge")}
-        </div>
       </div>
 
       {/* 6-Grid Acoustic Telemetry Tiles */}

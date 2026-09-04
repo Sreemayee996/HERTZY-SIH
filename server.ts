@@ -1,13 +1,24 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
+import fs from "fs";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+
+// Determine execution environment safely across ESM (dev mode) and bundled CJS (production):
+// - Dev mode runs directly with tsx server.ts (ESM scope)
+// - Production runs from bundled dist/server.cjs (CJS scope)
+const isProduction =
+  process.env.NODE_ENV === "production" ||
+  (typeof __filename !== "undefined" && __filename.endsWith("server.cjs")) ||
+  (typeof __dirname !== "undefined" && __dirname.endsWith("dist"));
+
+// In AI Studio local dev environment, port 3000 is required by the dev reverse proxy.
+// In deployed Cloud Run production, Cloud Run assigns a dynamic PORT (typically 8080).
+const PORT = isProduction && process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // Enable JSON body parsing with large payload capacity for audio base64 data
 app.use(express.json({ limit: "60mb" }));
@@ -30,8 +41,8 @@ function getGenAI(): GoogleGenAI {
   return genAIClient;
 }
 
-// Health check endpoint
-app.get("/api/health", (_req, res) => {
+// Health check endpoints (supports Cloud Run /healthz, /health, /api/health)
+app.get(["/healthz", "/health", "/api/health"], (_req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -106,14 +117,23 @@ Analyze this audio recording thoroughly for:
 
 Return the response strictly adhering to JSON format matching the schema.`;
 
-      // Candidate models in priority order
-      const candidateModels = ["gemini-2.5-flash", "gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
+      // Candidate models in priority order for multimodal audio risk evaluation
+      const candidateModels = [
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.6-flash",
+      ];
 
       for (const modelName of candidateModels) {
         try {
           const ai = getGenAI();
-          const response = await ai.models.generateContent({
-            model: modelName,
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout after 12s on model ${modelName}`)), 12000)
+          );
+          const response = await Promise.race([
+            ai.models.generateContent({
+              model: modelName,
             contents: [
               {
                 parts: [
@@ -206,15 +226,22 @@ Return the response strictly adhering to JSON format matching the schema.`;
                 ],
               },
             },
-          });
+          }),
+          timeoutPromise,
+        ]);
 
           if (response.text) {
             aiResult = JSON.parse(response.text);
             break; // Success!
           }
         } catch (err: any) {
-          console.warn(`Model ${modelName} analysis attempt returned:`, err?.message || err);
-          // Continue to next candidate model or fallback
+          const errMsg = err?.message || String(err);
+          // If 503 high demand or rate limited, gracefully proceed to the next model immediately
+          if (errMsg.includes("503") || errMsg.includes("high demand") || errMsg.includes("UNAVAILABLE")) {
+            console.info(`Model ${modelName} is experiencing temporary high demand (503). Automatically trying next candidate model...`);
+          } else {
+            console.warn(`Model ${modelName} analysis attempt returned:`, errMsg);
+          }
         }
       }
     }
@@ -309,25 +336,37 @@ app.post("/api/translate-transcript", async (req, res) => {
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
-      const translationModels = ["gemini-3.1-flash-lite", "gemini-3.7-flash"];
+      const translationModels = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.6-flash"];
       for (const modelName of translationModels) {
         try {
           const ai = getGenAI();
           if (text && !translation) {
-            const response = await ai.models.generateContent({
-              model: modelName,
-              contents: `Translate the following speech transcript accurately into language code '${targetLanguage}'. Note: The brand name 'Hertzy' must NOT be translated. Return only the raw translated text, nothing else.\n\nTranscript:\n${text}`,
-            });
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`Translation timeout on model ${modelName}`)), 6000)
+            );
+            const response = await Promise.race([
+              ai.models.generateContent({
+                model: modelName,
+                contents: `Translate the following speech transcript accurately into language code '${targetLanguage}'. Note: The brand name 'Hertzy' must NOT be translated. Return only the raw translated text, nothing else.\n\nTranscript:\n${text}`,
+              }),
+              timeoutPromise,
+            ]);
             if (response.text) {
               translation = response.text.trim();
             }
           }
 
           if (aiSummary && !translatedAiSummary) {
-            const summaryRes = await ai.models.generateContent({
-              model: modelName,
-              contents: `Translate the following 4-5 line bulleted AI threat and deepfake risk analysis summary accurately into language code '${targetLanguage}'. Maintain the numbered list format (1., 2., 3., 4., 5.). Note: The brand name 'Hertzy' must NOT be translated. Return only the raw translated bullets, nothing else.\n\nSummary:\n${aiSummary}`,
-            });
+            const summaryTimeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`Summary translation timeout on model ${modelName}`)), 6000)
+            );
+            const summaryRes = await Promise.race([
+              ai.models.generateContent({
+                model: modelName,
+                contents: `Translate the following 4-5 line bulleted AI threat and deepfake risk analysis summary accurately into language code '${targetLanguage}'. Maintain the numbered list format (1., 2., 3., 4., 5.). Note: The brand name 'Hertzy' must NOT be translated. Return only the raw translated bullets, nothing else.\n\nSummary:\n${aiSummary}`,
+              }),
+              summaryTimeoutPromise,
+            ]);
             if (summaryRes.text) {
               translatedAiSummary = summaryRes.text.trim();
             }
@@ -809,23 +848,36 @@ function generateFallbackHertzyAnalysis(
 }
 
 async function startServer() {
-  // Vite middleware in dev mode
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction) {
+    // Dynamic import for development Vite middleware
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    // In production, resolve the compiled dist directory containing index.html
+    const safeDirname = typeof __dirname !== "undefined" ? __dirname : process.cwd();
+    const candidateDistPaths = [
+      path.join(process.cwd(), "dist"),
+      safeDirname,
+      path.join(safeDirname, "dist"),
+    ];
+    const distPath = candidateDistPaths.find((p) => fs.existsSync(path.join(p, "index.html"))) || candidateDistPaths[0];
+
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Hertzy Audio Risk Server running at http://localhost:${PORT}`);
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Hertzy Audio Risk Server running at http://0.0.0.0:${PORT} (${isProduction ? "production" : "development"})`);
+  });
+
+  server.on("error", (err: any) => {
+    console.error(`Server failed to start on port ${PORT}:`, err);
   });
 }
 
