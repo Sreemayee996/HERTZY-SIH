@@ -82,3 +82,41 @@ export interface SavedSession {
   sourceType: string;
   suspiciousWordsCount: number;
 }
+
+export interface AnalysisRecord {
+  time: string;
+  userId: string;
+  input: string;
+  riskScore: number;
+  result: string;
+}
+
+export interface AdminAnalysisLogEntry {
+  id: string;
+  userCode: string;
+  timestamp: string;
+  overallRiskScore: number;
+  riskCategory: RiskCategory;
+  isDeepfakeSuspected: boolean;
+  audioSourceType: "microphone" | "upload" | "sample";
+  durationSeconds: number;
+  targetLanguage: string;
+}
+
+export interface AdminUserBreakdown {
+  userCode: string;
+  analysisCount: number;
+  averageScore: number;
+  highRiskCount: number;
+  lastActive: string;
+}
+
+export interface AdminSummaryData {
+  totalAnalyses: number;
+  averageRiskScore: number;
+  deepfakeSuspectedCount: number;
+  deepfakeRatePercent: number;
+  uniqueUserCount: number;
+  countByRiskCategory: Record<string, number>;
+  userBreakdown: AdminUserBreakdown[];
+}

@@ -1,4 +1,4 @@
-// Audio processing utility for acoustic extraction, WAV encoding, and Web Audio API handling
+// Audio processing utility for acoustic extraction, WAV encoding, normalization, and Web Audio handling
 
 export interface ClientAcoustics {
   pitchHz: number;
@@ -11,8 +11,17 @@ export interface ClientAcoustics {
   durationSeconds: number;
 }
 
-// Convert AudioBuffer to 16-bit PCM WAV base64 with fast chunked encoding and optional downsampling
-export function audioBufferToWavBase64(buffer: AudioBuffer, targetSampleRate: number = 22050): string {
+export interface PreprocessedAudioResult {
+  wavBase64: string;
+  audioBuffer: AudioBuffer;
+  acoustics: ClientAcoustics;
+  durationSeconds: number;
+  isEmptyOrSilent: boolean;
+  peakAmplitude: number;
+}
+
+// Convert AudioBuffer to 16-bit PCM WAV base64 with fast chunked encoding and linear interpolation resampling
+export function audioBufferToWavBase64(buffer: AudioBuffer, targetSampleRate: number = 16000): string {
   const numChannels = 1;
   const srcSampleRate = buffer.sampleRate;
   
@@ -29,18 +38,22 @@ export function audioBufferToWavBase64(buffer: AudioBuffer, targetSampleRate: nu
     }
   }
 
-  // Resample if target sample rate differs and is lower
+  // Resample with linear interpolation if target sample rate differs
   let channelData: Float32Array;
   let sampleRate = srcSampleRate;
 
-  if (targetSampleRate && targetSampleRate < srcSampleRate) {
+  if (targetSampleRate && targetSampleRate !== srcSampleRate) {
     sampleRate = targetSampleRate;
     const ratio = srcSampleRate / targetSampleRate;
-    const newLength = Math.round(srcData.length / ratio);
+    const newLength = Math.max(1, Math.round(srcData.length / ratio));
     channelData = new Float32Array(newLength);
     for (let i = 0; i < newLength; i++) {
-      const srcIdx = Math.min(srcData.length - 1, Math.floor(i * ratio));
-      channelData[i] = srcData[srcIdx];
+      const srcPos = i * ratio;
+      const index = Math.floor(srcPos);
+      const frac = srcPos - index;
+      const sample1 = srcData[Math.min(index, srcData.length - 1)];
+      const sample2 = srcData[Math.min(index + 1, srcData.length - 1)];
+      channelData[i] = sample1 + frac * (sample2 - sample1);
     }
   } else {
     channelData = srcData;
@@ -100,6 +113,90 @@ function writeString(view: DataView, offset: number, string: string) {
   for (let i = 0; i < string.length; i++) {
     view.setUint8(offset + i, string.charCodeAt(i));
   }
+}
+
+// Unified Audio Preprocessor for both Upload & Microphone inputs
+export function preprocessAudioBuffer(
+  buffer: AudioBuffer,
+  options: { targetSampleRate?: number; normalize?: boolean } = {}
+): PreprocessedAudioResult {
+  const targetSampleRate = options.targetSampleRate || 16000;
+  const shouldNormalize = options.normalize !== false;
+  const srcSampleRate = buffer.sampleRate;
+  const totalSrcSamples = buffer.length;
+
+  // 1. Extract mono or downmix
+  let monoData: Float32Array;
+  if (buffer.numberOfChannels === 1) {
+    monoData = new Float32Array(buffer.getChannelData(0));
+  } else {
+    const left = buffer.getChannelData(0);
+    const right = buffer.getChannelData(1);
+    monoData = new Float32Array(totalSrcSamples);
+    for (let i = 0; i < totalSrcSamples; i++) {
+      monoData[i] = (left[i] + right[i]) / 2;
+    }
+  }
+
+  // 2. Measure energy & check for silence/empty
+  let peak = 0;
+  let sumSquares = 0;
+  for (let i = 0; i < monoData.length; i++) {
+    const absVal = Math.abs(monoData[i]);
+    if (absVal > peak) peak = absVal;
+    sumSquares += monoData[i] * monoData[i];
+  }
+
+  const rms = monoData.length > 0 ? Math.sqrt(sumSquares / monoData.length) : 0;
+  const durationSeconds = buffer.duration;
+  const isEmptyOrSilent = durationSeconds < 0.3 || peak < 0.003 || rms < 0.001;
+
+  // 3. Peak Normalization (scale to 0.88 headroom to avoid clipping while ensuring consistent levels)
+  if (shouldNormalize && !isEmptyOrSilent && peak > 0.005) {
+    const targetPeak = 0.88;
+    const scale = Math.min(20.0, targetPeak / peak);
+    for (let i = 0; i < monoData.length; i++) {
+      monoData[i] = Math.max(-1, Math.min(1, monoData[i] * scale));
+    }
+  }
+
+  // 4. Resample to standard targetSampleRate (16,000 Hz) using linear interpolation
+  let resampledData: Float32Array;
+  if (targetSampleRate && targetSampleRate !== srcSampleRate) {
+    const ratio = srcSampleRate / targetSampleRate;
+    const targetLength = Math.max(1, Math.round(monoData.length / ratio));
+    resampledData = new Float32Array(targetLength);
+    for (let i = 0; i < targetLength; i++) {
+      const srcPos = i * ratio;
+      const idx = Math.floor(srcPos);
+      const frac = srcPos - idx;
+      const s1 = monoData[Math.min(idx, monoData.length - 1)];
+      const s2 = monoData[Math.min(idx + 1, monoData.length - 1)];
+      resampledData[i] = s1 + frac * (s2 - s1);
+    }
+  } else {
+    resampledData = monoData;
+  }
+
+  // 5. Create standardized AudioBuffer for UI playback & visualizer
+  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const normalizedBuffer = audioCtx.createBuffer(1, resampledData.length, targetSampleRate);
+  normalizedBuffer.copyToChannel(resampledData, 0);
+
+  // 6. Encode standardized 16-bit PCM WAV base64
+  const wavBase64 = audioBufferToWavBase64(normalizedBuffer, targetSampleRate);
+
+  // 7. Extract acoustic features deterministically
+  const acoustics = extractAcousticFeatures(normalizedBuffer);
+
+  return {
+    wavBase64,
+    audioBuffer: normalizedBuffer,
+    acoustics,
+    durationSeconds: Number(normalizedBuffer.duration.toFixed(2)),
+    isEmptyOrSilent,
+    peakAmplitude: peak,
+  };
 }
 
 // Extract detailed acoustic indicators from an AudioBuffer

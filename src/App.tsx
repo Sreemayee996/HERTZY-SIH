@@ -11,8 +11,10 @@ import { SuspiciousKeywordsPanel } from "./components/SuspiciousKeywordsPanel";
 import { ToneProsodyAcoustics } from "./components/ToneProsodyAcoustics";
 import { AiSummaryCard } from "./components/AiSummaryCard";
 import { AnalysisHistoryModal } from "./components/AnalysisHistoryModal";
+import { AdminDashboard } from "./components/AdminDashboard";
 import { extractAcousticFeatures } from "./services/audioProcessor";
 import { useLanguage } from "./context/LanguageContext";
+import { getOrCreateAnonymousUserId } from "./utils/userCode";
 import { BENCHMARK_AI_SUMMARIES, BENCHMARK_TRANSCRIPTS } from "./utils/aiSummaryTranslations";
 import {
   ShieldAlert,
@@ -140,6 +142,22 @@ const BENCHMARK_INITIAL_ANALYSIS: AudioAnalysisResult = {
 
 export default function App() {
   const { t } = useLanguage();
+
+  // URL routing for /admin
+  const [currentPath, setCurrentPath] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      return window.location.pathname;
+    }
+    return "/";
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentPath(window.location.pathname);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   // Authentication state - strictly requires valid login (starts with demo user session)
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -295,6 +313,8 @@ export default function App() {
       setLiveAudioEnergyDb(clientAcoustics.energyRmsDb);
 
       // 2. Query Express Hertzy Analysis API
+      const anonymousUserId = getOrCreateAnonymousUserId();
+
       const res = await fetch("/api/analyze-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -306,6 +326,10 @@ export default function App() {
           clientAcoustics,
           scenarioTitle: data.scenarioTitle || data.fileName || "",
           liveTranscript: data.liveTranscript,
+          userId: anonymousUserId,
+          input: data.sourceType,
+          audioSourceType: data.sourceType,
+          durationSeconds: data.durationSeconds,
         }),
       });
 
@@ -512,6 +536,25 @@ export default function App() {
     setCurrentAnalysis(reconstructed);
     setIsCurrentSessionSaved(true);
   };
+
+  // /admin Route Check: renders AdminDashboard directly (no normal user login needed)
+  const isAdminPage =
+    currentPath.toLowerCase() === "/admin" ||
+    currentPath.toLowerCase().startsWith("/admin/") ||
+    (typeof window !== "undefined" && window.location.pathname.toLowerCase().startsWith("/admin"));
+
+  if (isAdminPage) {
+    return (
+      <AdminDashboard
+        onExit={() => {
+          if (typeof window !== "undefined") {
+            window.history.pushState({}, "", "/");
+          }
+          setCurrentPath("/");
+        }}
+      />
+    );
+  }
 
   // If user is not logged in, render LoginPage strictly
   if (!currentUser) {

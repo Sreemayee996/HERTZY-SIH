@@ -17,8 +17,18 @@ import {
   ShieldAlert,
   ShieldCheck,
   ListChecks,
+  ArrowRight,
+  RefreshCw,
+  Sparkles,
+  Music,
 } from "lucide-react";
-import { audioBufferToWavBase64 } from "../services/audioProcessor";
+import {
+  audioBufferToWavBase64,
+  extractAcousticFeatures,
+  preprocessAudioBuffer,
+  ClientAcoustics,
+  PreprocessedAudioResult,
+} from "../services/audioProcessor";
 import { useLanguage } from "../context/LanguageContext";
 
 interface AudioInputSectionProps {
@@ -53,6 +63,7 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [liveSpeechText, setLiveSpeechText] = useState<string>("");
+  const liveSpeechTextRef = useRef<string>("");
   const [liveAudioMetrics, setLiveAudioMetrics] = useState({ pitchHz: 0, db: -60 });
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -70,6 +81,8 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
   const [uploadedFileSize, setUploadedFileSize] = useState<string | null>(null);
   const [uploadedAudioBuffer, setUploadedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [uploadedBase64, setUploadedBase64] = useState<string | null>(null);
+  const [uploadedFileAcoustics, setUploadedFileAcoustics] = useState<ClientAcoustics | null>(null);
+  const [hasAnalyzedFile, setHasAnalyzedFile] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState(false);
 
   // Audio Playback state
@@ -144,6 +157,7 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
     try {
       setStatusNote("");
       setLiveSpeechText("");
+      liveSpeechTextRef.current = "";
       audioChunksRef.current = [];
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -188,6 +202,7 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
               currentTranscript += event.results[i][0].transcript;
             }
             setLiveSpeechText(currentTranscript);
+            liveSpeechTextRef.current = currentTranscript;
           };
 
           recognizer.onerror = (e: any) => {
@@ -218,15 +233,25 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
         try {
           const decodeCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
           const decoded = await decodeCtx.decodeAudioData(arrayBuffer);
-          const cleanWavBase64 = audioBufferToWavBase64(decoded);
           
+          // Unified audio preprocessing: mono, peak normalization, silence detection, 16kHz resampling
+          const preprocessed = preprocessAudioBuffer(decoded, {
+            targetSampleRate: 16000,
+            normalize: enableNormalization,
+          });
+
+          if (preprocessed.isEmptyOrSilent) {
+            setStatusNote("No audible speech detected from microphone. Please speak clearly into your microphone.");
+            return;
+          }
+
           onAudioReadyForAnalysis({
-            audioBase64: cleanWavBase64,
-            audioBuffer: decoded,
+            audioBase64: preprocessed.wavBase64,
+            audioBuffer: preprocessed.audioBuffer,
             sourceType: "microphone",
             fileName: `Live_Mic_Capture_${new Date().toLocaleTimeString().replace(/:/g, "-")}.wav`,
-            durationSeconds: decoded.duration,
-            liveTranscript: liveSpeechText || undefined,
+            durationSeconds: preprocessed.durationSeconds,
+            liveTranscript: liveSpeechTextRef.current.trim() || undefined,
           });
         } catch (err) {
           console.warn("Direct WebM AudioData decode fallback:", err);
@@ -236,15 +261,20 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
             const base64data = reader.result as string;
             const cleanBase64 = base64data.split(",")[1] || base64data;
             const fallbackCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-            const fallbackBuffer = fallbackCtx.createBuffer(1, 22050 * Math.max(2, recordingSeconds), 22050);
+            const fallbackBuffer = fallbackCtx.createBuffer(1, 16000 * Math.max(1, recordingSeconds), 16000);
             
+            if (recordingSeconds < 1) {
+              setStatusNote("Recording was too short to analyze. Please record at least 1-2 seconds of speech.");
+              return;
+            }
+
             onAudioReadyForAnalysis({
               audioBase64: cleanBase64,
               audioBuffer: fallbackBuffer,
               sourceType: "microphone",
               fileName: `Live_Mic_Capture_${new Date().toLocaleTimeString().replace(/:/g, "-")}.webm`,
-              durationSeconds: Math.max(2, recordingSeconds),
-              liveTranscript: liveSpeechText || undefined,
+              durationSeconds: Math.max(1, recordingSeconds),
+              liveTranscript: liveSpeechTextRef.current.trim() || undefined,
             });
           };
         }
@@ -287,6 +317,32 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
     }
   };
 
+  // Trigger analysis on uploaded file
+  const handleTriggerUploadAnalysis = (
+    bufferOverride?: AudioBuffer,
+    base64Override?: string,
+    nameOverride?: string
+  ) => {
+    const targetBuffer = bufferOverride || uploadedAudioBuffer;
+    const targetBase64 = base64Override || uploadedBase64;
+    const targetName = nameOverride || uploadedFileName || "Uploaded_Audio.wav";
+
+    if (!targetBuffer || !targetBase64) {
+      setStatusNote("Please upload an audio file first before running analysis.");
+      return;
+    }
+
+    setStatusNote("");
+    onAudioReadyForAnalysis({
+      audioBase64: targetBase64,
+      audioBuffer: targetBuffer,
+      sourceType: "upload",
+      fileName: targetName,
+      durationSeconds: targetBuffer.duration,
+    });
+    setHasAnalyzedFile(true);
+  };
+
   // Upload Audio File handler
   const handleFileUpload = async (file: File) => {
     if (!file) return;
@@ -299,27 +355,27 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
     
     try {
       const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-      setUploadedAudioBuffer(decodedBuffer);
 
-      // Convert file to Base64
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onloadend = () => {
-        const base64data = reader.result as string;
-        const cleanBase64 = base64data.split(",")[1] || base64data;
-        setUploadedBase64(cleanBase64);
+      // Unified preprocessing: mono downmix, peak normalization, silence check, 16kHz resampling
+      const preprocessed = preprocessAudioBuffer(decodedBuffer, {
+        targetSampleRate: 16000,
+        normalize: enableNormalization,
+      });
 
-        onAudioReadyForAnalysis({
-          audioBase64: cleanBase64,
-          audioBuffer: decodedBuffer,
-          sourceType: "upload",
-          fileName: file.name,
-          durationSeconds: decodedBuffer.duration,
-        });
-      };
+      if (preprocessed.isEmptyOrSilent) {
+        setStatusNote("The uploaded audio file is silent or corrupted. Please upload an audio file containing audible speech.");
+        return;
+      }
+
+      setUploadedAudioBuffer(preprocessed.audioBuffer);
+      setUploadedBase64(preprocessed.wavBase64);
+      setUploadedFileAcoustics(preprocessed.acoustics);
+
+      // Auto-trigger the risk evaluation immediately on upload with preprocessed buffer & base64
+      handleTriggerUploadAnalysis(preprocessed.audioBuffer, preprocessed.wavBase64, file.name);
     } catch (err: any) {
       console.error("Error decoding audio file:", err);
-      setStatusNote("Failed to decode audio file format. Please upload standard .wav or .mp3 audio.");
+      setStatusNote("Failed to decode audio file format. Please upload standard .wav, .mp3, .m4a, or .ogg audio.");
     }
   };
 
@@ -525,71 +581,305 @@ export const AudioInputSection: React.FC<AudioInputSectionProps> = ({
 
       {/* Mode 2: Upload File */}
       {activeInputMode === "upload" && (
-        <div className="space-y-3">
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDragging(false);
-              if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                handleFileUpload(e.dataTransfer.files[0]);
-              }
-            }}
-            className={`relative flex flex-col items-center justify-center p-6 border-2 border-dashed rounded-lg transition-all ${
-              isDragging
-                ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-500/10"
-                : "border-slate-300 dark:border-slate-800 hover:border-indigo-500 bg-slate-50 dark:bg-[#0F172A]"
-            }`}
-          >
-            <input
-              id="audio-file-input"
-              type="file"
-              accept="audio/mp3,audio/wav,audio/m4a,audio/ogg,audio/webm,.mp3,.wav,.m4a,.ogg"
-              onChange={(e) => {
-                if (e.target.files && e.target.files[0]) {
-                  handleFileUpload(e.target.files[0]);
-                }
-              }}
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-            />
-
-            <FileAudio className="w-10 h-10 text-indigo-600 dark:text-indigo-400 mb-2" />
-            <div className="text-sm font-semibold text-slate-900 dark:text-white">
-              {t("drop_audio_here")} <span className="text-indigo-600 dark:text-indigo-400 underline">{t("browse")}</span>
+        <div className="space-y-4">
+          {/* Step Guide Header Bar */}
+          <div className="p-3.5 rounded-xl bg-slate-100/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 uppercase tracking-wider">
+                <ListChecks className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                Audio File Analysis Pipeline
+              </span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                Follow steps 1 → 2 → 3
+              </span>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              {t("supports_formats")}
-            </p>
-          </div>
 
-          {/* Uploaded File Info & Playback Bar */}
-          {uploadedFileName && (
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 dark:bg-[#0F172A] border border-slate-200 dark:border-slate-800 text-xs shadow-xs">
-              <div className="flex items-center gap-3">
-                <button
-                  id="play-uploaded-audio-btn"
-                  onClick={togglePlayUploadedAudio}
-                  className="p-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all cursor-pointer shadow-xs"
-                >
-                  {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                </button>
-                <div>
-                  <div className="font-semibold text-slate-900 dark:text-slate-200">{uploadedFileName}</div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                    {uploadedFileSize} • {uploadedAudioBuffer ? `${uploadedAudioBuffer.duration.toFixed(1)}s duration` : "Processing..."}
-                  </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+              {/* Step 1 Pill */}
+              <div
+                className={`p-2.5 rounded-lg border transition-all ${
+                  uploadedAudioBuffer
+                    ? "bg-emerald-50/80 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800/70 text-emerald-900 dark:text-emerald-300"
+                    : "bg-indigo-50/80 dark:bg-indigo-950/50 border-indigo-300 dark:border-indigo-700 text-indigo-950 dark:text-indigo-200"
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-bold mb-0.5">
+                  {uploadedAudioBuffer ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  ) : (
+                    <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">
+                      1
+                    </span>
+                  )}
+                  <span>Step 1: Upload</span>
+                </div>
+                <div className="text-[11px] opacity-80 pl-5">
+                  {uploadedAudioBuffer ? "Audio Decoded" : "Select or Drop Audio"}
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-mono text-[11px] font-medium">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  {t("decoded_ready")}
+              {/* Step 2 Pill */}
+              <div
+                className={`p-2.5 rounded-lg border transition-all ${
+                  uploadedAudioBuffer
+                    ? "bg-indigo-50/80 dark:bg-indigo-950/50 border-indigo-300 dark:border-indigo-700 text-indigo-950 dark:text-indigo-200"
+                    : "bg-white/60 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-500"
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-bold mb-0.5">
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 ${
+                    uploadedAudioBuffer ? "bg-indigo-600 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400"
+                  }`}>
+                    2
+                  </span>
+                  <span>Step 2: Preview</span>
+                </div>
+                <div className="text-[11px] opacity-80 pl-5">
+                  {uploadedAudioBuffer ? "Listen & Spectrogram" : "Waveform & Pitch"}
+                </div>
+              </div>
+
+              {/* Step 3 Pill */}
+              <div
+                className={`p-2.5 rounded-lg border transition-all ${
+                  isAnalyzing
+                    ? "bg-indigo-100 dark:bg-indigo-950 border-indigo-500 text-indigo-950 dark:text-indigo-200 animate-pulse"
+                    : hasAnalyzedFile
+                    ? "bg-emerald-50/80 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800/70 text-emerald-900 dark:text-emerald-300"
+                    : uploadedAudioBuffer
+                    ? "bg-amber-50/80 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-300"
+                    : "bg-white/60 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-500"
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-bold mb-0.5">
+                  {hasAnalyzedFile && !isAnalyzing ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  ) : (
+                    <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] shrink-0">
+                      3
+                    </span>
+                  )}
+                  <span>Step 3: Risk Score</span>
+                </div>
+                <div className="text-[11px] opacity-80 pl-5">
+                  {isAnalyzing
+                    ? "Engine Evaluating..."
+                    : hasAnalyzedFile
+                    ? "Analysis Completed"
+                    : "Run Hertzy AI Engine"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* STEP 1: Upload or Replace File */}
+          {!uploadedAudioBuffer ? (
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                  handleFileUpload(e.dataTransfer.files[0]);
+                }
+              }}
+              className={`relative flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-xl transition-all cursor-pointer ${
+                isDragging
+                  ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-500/10 scale-[1.01]"
+                  : "border-slate-300 dark:border-slate-700 hover:border-indigo-500 bg-slate-50/70 dark:bg-[#0F172A]"
+              }`}
+            >
+              <input
+                id="audio-file-input"
+                type="file"
+                accept="audio/mp3,audio/wav,audio/m4a,audio/ogg,audio/webm,.mp3,.wav,.m4a,.ogg"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleFileUpload(e.target.files[0]);
+                  }
+                }}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+
+              <div className="w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-950/60 flex items-center justify-center text-indigo-600 dark:text-indigo-400 mb-3">
+                <FileAudio className="w-6 h-6" />
+              </div>
+              <div className="text-sm font-semibold text-slate-900 dark:text-white text-center">
+                {t("drop_audio_here")}{" "}
+                <span className="text-indigo-600 dark:text-indigo-400 underline font-bold">
+                  {t("browse")}
                 </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 text-center">
+                Supports MP3, WAV, M4A, OGG • Audio will be decoded and converted to PCM WAV
+              </p>
+            </div>
+          ) : (
+            <div className="p-3.5 rounded-xl bg-white dark:bg-[#0F172A] border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                    <FileAudio className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-sm text-slate-900 dark:text-slate-100 truncate max-w-[260px] sm:max-w-md">
+                      {uploadedFileName}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                      <span>{uploadedFileSize}</span>
+                      <span>•</span>
+                      <span>{uploadedAudioBuffer.duration.toFixed(1)}s duration</span>
+                      <span>•</span>
+                      <span className="font-mono">{uploadedAudioBuffer.sampleRate} Hz</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="audio-file-input-replace"
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-medium cursor-pointer transition-all flex items-center gap-1"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    Change
+                  </label>
+                  <input
+                    id="audio-file-input-replace"
+                    type="file"
+                    accept="audio/mp3,audio/wav,audio/m4a,audio/ogg,audio/webm,.mp3,.wav,.m4a,.ogg"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleFileUpload(e.target.files[0]);
+                      }
+                    }}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              {/* Status Badge */}
+              <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800/80 text-xs">
+                <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-medium">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Decoded & Standardized into 16-bit PCM WAV</span>
+                </div>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Ready for AI Multi-Window Analysis
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 2: Preview & Acoustic Inspection (Shown when file is loaded) */}
+          {uploadedAudioBuffer && (
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <Music className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  Step 2: Preview Audio & Live Waveform Hookup
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {isPlaying ? "Playing to visualizer..." : "Click play to listen"}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-lg bg-white dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800">
+                <div className="flex items-center gap-3">
+                  <button
+                    id="play-uploaded-audio-btn"
+                    onClick={togglePlayUploadedAudio}
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
+                  >
+                    {isPlaying ? (
+                      <>
+                        <Pause className="w-3.5 h-3.5" />
+                        <span>Pause Preview</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Play Audio Preview</span>
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-xs text-slate-600 dark:text-slate-400">
+                    Streams live frequency to oscilloscope & hybrid spectrum above
+                  </div>
+                </div>
+
+                {/* Pre-calculated Acoustic Specs */}
+                {uploadedFileAcoustics && (
+                  <div className="flex items-center gap-3 text-[11px] font-mono">
+                    <div className="px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      Pitch: <span className="font-bold text-indigo-600 dark:text-indigo-400">{uploadedFileAcoustics.pitchHz.toFixed(0)} Hz</span>
+                    </div>
+                    <div className="px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      Energy: <span className="font-bold text-indigo-600 dark:text-indigo-400">{uploadedFileAcoustics.energyRmsDb.toFixed(1)} dB</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3: Run AI & Acoustic Risk Analysis */}
+          {uploadedAudioBuffer && (
+            <div className="p-3.5 rounded-xl bg-gradient-to-br from-indigo-50/60 to-purple-50/60 dark:from-indigo-950/40 dark:to-purple-950/40 border border-indigo-200 dark:border-indigo-800/70 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  Step 3: Hertzy AI Risk Analysis
+                </span>
+                <span className="text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
+                  {selectedWindowDuration}s time slices
+                </span>
+              </div>
+
+              {/* Main Action Button */}
+              {isAnalyzing ? (
+                <button
+                  disabled
+                  className="w-full py-3 px-4 rounded-xl bg-indigo-600/80 text-white font-semibold text-sm flex items-center justify-center gap-2.5 shadow-md cursor-wait"
+                >
+                  <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                  <span>Analyzing Audio (Acoustics, Deepfake Clone & Threat Score)...</span>
+                </button>
+              ) : (
+                <button
+                  id="run-upload-analysis-btn"
+                  onClick={() => handleTriggerUploadAnalysis()}
+                  className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-[0.99] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
+                >
+                  <ShieldAlert className="w-4 h-4" />
+                  <span>
+                    {hasAnalyzedFile ? "Re-Run Risk Analysis on File" : "Run Risk Analysis Now"}
+                  </span>
+                </button>
+              )}
+
+              {/* Engine features summary checklist */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] text-indigo-950/80 dark:text-indigo-300/90 pt-1">
+                <div className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3 h-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>Synthesizer Vocoder & Flat Pitch Detection</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3 h-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>Urgency, Extortion & OTP Phishing Flags</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3 h-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>Full Transcript & Target Language Translation</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3 h-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>Multi-Window Temporal Risk Timeline</span>
+                </div>
               </div>
             </div>
           )}
